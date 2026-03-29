@@ -1,0 +1,12 @@
+**/node_modules
+**/npm-debug.log
+**/.DS_Store
+.git
+.gitignore
+*.md
+.env
+.vscode
+**/dist
+**/build
+server/node_modules
+frontend/node_modules

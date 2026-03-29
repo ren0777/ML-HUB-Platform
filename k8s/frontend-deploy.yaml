@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: colab-frontend
+  namespace: jhub
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: colab-frontend
+  template:
+    metadata:
+      labels:
+        app: colab-frontend
+    spec:
+      containers:
+      - name: frontend
+        image: jupyter-frontend:dev
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: colab-frontend
+  namespace: jhub
+spec:
+  selector:
+    app: colab-frontend
+  ports:
+  - port: 80
+    targetPort: 80
+  type: ClusterIP

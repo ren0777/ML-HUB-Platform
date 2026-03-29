@@ -1,0 +1,31 @@
+# helm/jupyterhub-config.yaml
+hub:
+  extraConfig: 
+    adminAccess: |
+      c.JupyterHub.admin_access = True
+
+proxy:
+  secretToken: "7d"
+
+singleuser:
+  image:
+    name: "jupyter-singleuser"
+    tag: "dev"
+  defaultUrl: "/lab"
+  storage:
+    capacity: 10Gi
+  profileList:
+    - display_name: "Small (CPU)"
+      description: "2 CPU, 4 GiB RAM"
+      slug: "small-cpu"
+      default: true
+      kubespawner_override:
+        cpu_limit: 2
+        mem_limit: "4G"
+    - display_name: "GPU (1x)"
+      description: "1 GPU, 12 GiB RAM"
+      slug: "gpu-1"
+      kubespawner_override:
+        extra_resource_limits:
+          nvidia.com/gpu: "1"
+        mem_limit: "12G"

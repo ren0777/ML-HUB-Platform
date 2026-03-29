@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: colab-backend
+  namespace: jhub
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: colab-backend-role
+  namespace: jhub
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "pods", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: colab-backend-binding
+  namespace: jhub
+subjects:
+  - kind: ServiceAccount
+    name: colab-backend
+    namespace: jhub
+roleRef:
+  kind: Role
+  name: colab-backend-role
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,18 @@
+FROM jupyter/scipy-notebook:latest
+WORKDIR /home/jovyan/work
+
+ENV NOTEBOOK_PORT=8888
+ENV NOTEBOOK_BASE_URL=/jupyter
+ENV NOTEBOOK_ROOT_DIR=/home/jovyan/work
+
+RUN pip install --no-cache-dir \
+    scikit-learn pandas numpy matplotlib seaborn flask
+
+COPY --chmod=755 docker/mlhub-start.sh /usr/local/bin/mlhub-start.sh
+
+# Declare volumes for Docker Compose
+VOLUME ["/home/jovyan/work", "/home/jovyan/.local"]
+
+EXPOSE 8888
+
+CMD ["/usr/local/bin/mlhub-start.sh"]

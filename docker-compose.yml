@@ -36,8 +36,8 @@ services:
       - COLLEGE_DOMAIN=gla.ac.in
       - SMTP_HOST=smtp.gmail.com
       - SMTP_PORT=587
-      - SMTP_USER=moham77877897@gmail.com
-      - SMTP_PASS=lcoyowwnfbzpbqyr
+      - SMTP_USER=
+      - SMTP_PASS=
 
 volumes:
   notebooks_data:

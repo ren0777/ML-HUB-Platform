@@ -33,6 +33,11 @@ services:
       - NOTEBOOK_BASE_URL_PREFIX=/jupyter
       - DOCKER_NOTEBOOK_NETWORK=${COMPOSE_PROJECT_NAME:-colab-clone}_default
       - DOCKER_SOCKET_PATH=/var/run/docker.sock
+      - COLLEGE_DOMAIN=gla.ac.in
+      - SMTP_HOST=smtp.gmail.com
+      - SMTP_PORT=587
+      - SMTP_USER=moham77877897@gmail.com
+      - SMTP_PASS=lcoyowwnfbzpbqyr
 
 volumes:
   notebooks_data:

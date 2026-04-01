@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 const k8s = require('@kubernetes/client-node');
 const Docker = require('dockerode');
+const nodemailer = require('nodemailer');
 
 const app = express();
 app.use(express.json());
@@ -29,11 +30,20 @@ const NOTEBOOK_PVC_SIZE = process.env.NOTEBOOK_PVC_SIZE || '5Gi';
 const sessions = new Map();
 const users = new Map();
 const eventClients = new Map();
+const otpVerifications = new Map();
 let nextEventClientId = 1;
 
 const dataDir = process.env.DATA_DIR || path.join(__dirname, 'data');
 const notebooksDir = process.env.NOTEBOOKS_DIR || path.join(__dirname, 'notebooks');
 const usersFilePath = process.env.USERS_FILE_PATH || path.join(dataDir, 'users.json');
+const COLLEGE_DOMAIN = process.env.COLLEGE_DOMAIN || 'gla.ac.in';
+const SMTP_HOST = process.env.SMTP_HOST || 'smtp.gmail.com';
+const SMTP_PORT = parseInt(process.env.SMTP_PORT || '587', 10);
+const SMTP_USER = process.env.SMTP_USER || '';
+const SMTP_PASS = process.env.SMTP_PASS || '';
+const OTP_EXPIRY_MS = 5 * 60 * 1000;
+const OTP_MAX_ATTEMPTS = 3;
+const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
 
 let k8sCoreApi = null;
 let k8sAppsApi = null;
@@ -129,6 +139,74 @@ function emitEvent(type, payload, options = {}) {
       }
       eventClients.delete(client.id);
     }
+  }
+}
+
+// Nodemailer transporter setup
+let emailTransporter;
+if (SMTP_USER && SMTP_PASS) {
+  emailTransporter = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_PORT === 465,
+    auth: {
+      user: SMTP_USER,
+      pass: SMTP_PASS
+    }
+  });
+}
+
+// OTP helper functions
+function generateOtp() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+function hashOtp(otp) {
+  return crypto.createHash('sha256').update(otp).digest('hex');
+}
+
+async function sendOtpEmail(email, otp) {
+  if (!emailTransporter) {
+    console.log(`[DEV MODE] OTP for ${email}: ${otp}`);
+    return true;
+  }
+  try {
+    await emailTransporter.sendMail({
+      from: SMTP_USER,
+      to: email,
+      subject: 'MLHub Verification Code',
+      text: `Your MLHub OTP is ${otp}. It expires in 5 minutes. Do not share this code with anyone.`,
+      html: `
+        <div style="margin:0;padding:24px;background:#f7f8fb;font-family:'Segoe UI',Tahoma,sans-serif;color:#1f2937;">
+          <div style="max-width:560px;margin:0 auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden;box-shadow:0 6px 24px rgba(15,23,42,0.06);">
+            <div style="padding:18px 22px;background:linear-gradient(120deg,#f9fafb,#eef2ff);border-bottom:1px solid #e5e7eb;">
+              <p style="margin:0;font-size:12px;letter-spacing:1px;color:#64748b;text-transform:uppercase;">MLHub</p>
+              <h2 style="margin:8px 0 0 0;font-size:20px;font-weight:700;color:#111827;">Your login code is here</h2>
+            </div>
+
+            <div style="padding:24px 22px;line-height:1.65;">
+              <p style="margin:0 0 14px 0;color:#374151;">A calm little check-in from your notebook workspace.</p>
+              <p style="margin:0 0 16px 0;color:#374151;">Use this OTP to verify your account:</p>
+
+              <div style="margin:0 0 16px 0;padding:14px 16px;border:1px dashed #cbd5e1;border-radius:10px;background:#f8fafc;text-align:center;">
+                <span style="display:inline-block;font-size:34px;letter-spacing:8px;font-weight:700;color:#0f172a;">${otp}</span>
+              </div>
+
+              <p style="margin:0 0 6px 0;color:#475569;font-size:14px;">This code expires in <strong>5 minutes</strong>.</p>
+              <p style="margin:0;color:#475569;font-size:14px;">For safety, do not share it with anyone.</p>
+            </div>
+
+            <div style="padding:14px 22px;border-top:1px solid #e5e7eb;background:#fafafa;">
+              <p style="margin:0;font-size:12px;color:#94a3b8;">If you did not request this, you can ignore this email.</p>
+            </div>
+          </div>
+        </div>
+      `
+    });
+    return true;
+  } catch (err) {
+    console.error('Email send failed:', err);
+    return false;
   }
 }
 
@@ -881,6 +959,109 @@ async function deleteNotebookResources(session) {
   }
 }
 
+app.post('/auth/signup/request-otp', async (req, res) => {
+  const { username, email, password } = req.body;
+
+  if (!username || !email || !password) {
+    return res.status(400).json({ message: 'Missing username, email, or password' });
+  }
+
+  if (!email.toLowerCase().endsWith(`@${COLLEGE_DOMAIN}`)) {
+    return res.status(400).json({ message: `Email must be from @${COLLEGE_DOMAIN} domain` });
+  }
+
+  if (users.has(username)) {
+    return res.status(400).json({ message: 'Username already exists' });
+  }
+
+  // Check if email already used
+  for (const [_, user] of users) {
+    if (user.email === email.toLowerCase()) {
+      return res.status(400).json({ message: 'Email already registered' });
+    }
+  }
+
+  // Generate OTP
+  const otp = generateOtp();
+  const otpHash = hashOtp(otp);
+  const hashedPassword = hashPassword(password);
+  const expiresAt = Date.now() + OTP_EXPIRY_MS;
+
+  // Store OTP verification data
+  otpVerifications.set(email.toLowerCase(), {
+    username,
+    email: email.toLowerCase(),
+    passwordHash: hashedPassword,
+    otpHash,
+    expiresAt,
+    attempts: 0,
+    lastSentAt: Date.now()
+  });
+
+  // Send OTP email
+  const emailSent = await sendOtpEmail(email, otp);
+  if (!emailSent) {
+    otpVerifications.delete(email.toLowerCase());
+    return res.status(500).json({ message: 'Failed to send OTP email' });
+  }
+
+  res.json({ message: 'OTP sent to email', email: email });
+});
+
+app.post('/auth/signup/verify-otp', (req, res) => {
+  const { email, otp } = req.body;
+
+  if (!email || !otp) {
+    return res.status(400).json({ message: 'Missing email or OTP' });
+  }
+
+  const verificationData = otpVerifications.get(email.toLowerCase());
+  if (!verificationData) {
+    return res.status(400).json({ message: 'No pending verification for this email' });
+  }
+
+  if (Date.now() > verificationData.expiresAt) {
+    otpVerifications.delete(email.toLowerCase());
+    return res.status(400).json({ message: 'OTP expired' });
+  }
+
+  if (verificationData.attempts >= OTP_MAX_ATTEMPTS) {
+    otpVerifications.delete(email.toLowerCase());
+    return res.status(400).json({ message: 'Max attempts exceeded. Request OTP again.' });
+  }
+
+  const otpHash = hashOtp(otp);
+  if (otpHash !== verificationData.otpHash) {
+    verificationData.attempts++;
+    return res.status(400).json({ message: `Invalid OTP. ${OTP_MAX_ATTEMPTS - verificationData.attempts} attempts remaining.` });
+  }
+
+  // OTP verified, create user
+  const { username, passwordHash, email: userEmail } = verificationData;
+  const userObject = {
+    password: passwordHash,
+    role: 'user',
+    email: userEmail,
+    verified: true,
+    verifiedAt: new Date().toISOString()
+  };
+
+  users.set(username, userObject);
+  saveUsers();
+
+  // Create a directory for the user's notebooks
+  const userNotebooksDir = path.join(notebooksDir, username);
+  if (!fs.existsSync(userNotebooksDir)) {
+    fs.mkdirSync(userNotebooksDir);
+  }
+
+  otpVerifications.delete(email.toLowerCase());
+
+  const token = jwt.sign({ username, role: userObject.role }, JWT_SECRET, { expiresIn: '7d' });
+  emitEvent('user_added', { username, role: userObject.role }, { toRole: 'admin' });
+  res.json({ token });
+});
+
 app.post('/auth/signup', (req, res) => {
   const { username, password } = req.body;
   if (users.has(username)) {
@@ -915,6 +1096,31 @@ app.post('/auth/login', (req, res) => {
   }
   const token = jwt.sign({ username, role: user.role }, JWT_SECRET, { expiresIn: '7d' }); // Include role in token
   res.json({ token });
+});
+
+app.get('/auth/profile', (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) {
+    return res.status(401).json({ message: 'Missing token' });
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const user = users.get(decoded.username);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    res.json({
+      username: decoded.username,
+      role: user.role,
+      email: user.email || null,
+      verified: user.verified || false,
+      verifiedAt: user.verifiedAt || null
+    });
+  } catch (err) {
+    res.status(401).json({ message: 'Invalid token' });
+  }
 });
 
 app.get('/events', (req, res) => {

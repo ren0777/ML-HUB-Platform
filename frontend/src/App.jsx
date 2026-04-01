@@ -223,7 +223,14 @@ function App() {
   }, [sessionToken, iframeLoaded]);
 
   if (!token) {
-    return <Login onLogin={handleLogin} />;
+    return (
+      <Router>
+        <Routes>
+          <Route path="/" element={<Login onLogin={handleLogin} />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </Router>
+    );
   }
 
   const notebookUrl = `${jupyterBase || `/jupyter/${sessionToken}`}/lab`;

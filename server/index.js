@@ -1314,7 +1314,7 @@ async function createDockerNotebookResources(sessionId, username) {
 
   await ensureDockerVolume(volumeName);
 
-  const container = await dockerApi.createContainer({
+  const containerConfig = {
     name: containerName,
     Image: NOTEBOOK_IMAGE,
     User: '0',
@@ -1332,6 +1332,9 @@ async function createDockerNotebookResources(sessionId, username) {
       Binds: [`${volumeName}:${NOTEBOOK_ROOT_DIR}`],
       Memory: quota.memoryLimitBytes,
       MemoryReservation: Math.min(parseMemoryValueToBytes(NOTEBOOK_MEM_REQUEST), quota.memoryLimitBytes),
+      StorageOpt: {
+        size: `${quota.storageGi}G`,
+      },
       RestartPolicy: {
         Name: 'unless-stopped',
       },
@@ -1341,7 +1344,29 @@ async function createDockerNotebookResources(sessionId, username) {
       sessionId,
       username: sanitizeName(username),
     },
-  });
+  };
+
+  let container;
+  try {
+    container = await dockerApi.createContainer(containerConfig);
+  } catch (err) {
+    const errorMessage = err?.json?.message || err?.message || '';
+    const storageOptUnsupported = /storage-?opt|size|quota/i.test(errorMessage);
+
+    if (!storageOptUnsupported) {
+      throw err;
+    }
+
+    // Retry without StorageOpt for Docker drivers that do not support writable-layer quotas.
+    const fallbackConfig = {
+      ...containerConfig,
+      HostConfig: {
+        ...containerConfig.HostConfig,
+      },
+    };
+    delete fallbackConfig.HostConfig.StorageOpt;
+    container = await dockerApi.createContainer(fallbackConfig);
+  }
 
   await container.start();
 

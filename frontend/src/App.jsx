@@ -20,6 +20,127 @@ function UsernameRouteGuard({ username, children }) {
   return children;
 }
 
+function QuotaSetupCard({ token, onQuotaSaved }) {
+  const [tier, setTier] = useState('starter');
+  const [customMemoryMi, setCustomMemoryMi] = useState(1024);
+  const [customStorageGi, setCustomStorageGi] = useState(5);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const tierOptions = {
+    starter: { memoryMi: 1024, storageGi: 5 },
+    standard: { memoryMi: 2048, storageGi: 10 },
+    pro: { memoryMi: 4096, storageGi: 20 },
+  };
+
+  const quotaSelection = tier === 'custom'
+    ? { memoryMi: Number(customMemoryMi), storageGi: Number(customStorageGi) }
+    : tierOptions[tier];
+
+  const isMemoryValid = Number.isInteger(quotaSelection.memoryMi) && quotaSelection.memoryMi >= 512 && quotaSelection.memoryMi <= 4096 && quotaSelection.memoryMi % 256 === 0;
+  const isStorageValid = Number.isInteger(quotaSelection.storageGi) && quotaSelection.storageGi >= 5 && quotaSelection.storageGi <= 20;
+  const canSubmit = isMemoryValid && isStorageValid && !saving;
+
+  async function saveQuota(event) {
+    event.preventDefault();
+    setError(null);
+
+    if (!canSubmit) {
+      setError('Please choose a valid memory/storage combination within limits.');
+      return;
+    }
+
+    setSaving(true);
+
+    try {
+      const response = await fetch('/api/auth/quota', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          memoryMi: quotaSelection.memoryMi,
+          storageGi: quotaSelection.storageGi,
+        }),
+      });
+
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload?.message || `Quota save failed: ${response.status}`);
+      }
+
+      onQuotaSaved(payload.token);
+    } catch (err) {
+      setError(err.message || 'Failed to save quota.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="workspace-panel quota-setup-panel">
+      <p className="workspace-label">Final step after signup</p>
+      <h2 className="workspace-main-title">Set your workspace quota</h2>
+      <p className="workspace-copy workspace-copy-wide">
+        Choose memory and storage for your containers. Hard limits apply: up to 4Gi memory and 20Gi storage.
+      </p>
+
+      <form className="quota-form" onSubmit={saveQuota}>
+        <label className="login-field">
+          <span>Quota preset</span>
+          <select value={tier} onChange={(event) => setTier(event.target.value)}>
+            <option value="starter">Starter - 1Gi memory / 5Gi storage</option>
+            <option value="standard">Standard - 2Gi memory / 10Gi storage</option>
+            <option value="pro">Pro - 4Gi memory / 20Gi storage</option>
+            <option value="custom">Custom</option>
+          </select>
+        </label>
+
+        {tier === 'custom' && (
+          <div className="quota-custom-grid">
+            <label className="login-field">
+              <span>Memory (Mi)</span>
+              <input
+                type="number"
+                min="512"
+                max="4096"
+                step="256"
+                value={customMemoryMi}
+                onChange={(event) => setCustomMemoryMi(Number(event.target.value))}
+                required
+              />
+            </label>
+
+            <label className="login-field">
+              <span>Storage (Gi)</span>
+              <input
+                type="number"
+                min="5"
+                max="20"
+                step="1"
+                value={customStorageGi}
+                onChange={(event) => setCustomStorageGi(Number(event.target.value))}
+                required
+              />
+            </label>
+          </div>
+        )}
+
+        <div className="quota-summary">
+          <strong>Selected:</strong> {quotaSelection.memoryMi}Mi memory, {quotaSelection.storageGi}Gi storage
+        </div>
+
+        {error && <div className="login-error">{error}</div>}
+
+        <button type="submit" className="app-primary-button" disabled={!canSubmit}>
+          {saving ? 'Saving quota...' : 'Continue to workspace'}
+        </button>
+      </form>
+    </section>
+  );
+}
+
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem('token'));
   const [sessionToken, setSessionToken] = useState(null);
@@ -28,6 +149,7 @@ function App() {
   const [error, setError] = useState(null);
   const [userRole, setUserRole] = useState(null);
   const [username, setUsername] = useState(null);
+  const [quotaSetupComplete, setQuotaSetupComplete] = useState(true);
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const [authReady, setAuthReady] = useState(false);
 
@@ -39,7 +161,11 @@ function App() {
         const decodedToken = jwtDecode(storedToken);
         setUserRole(decodedToken.role);
         setUsername(decodedToken.username || null);
-        createSession(storedToken);
+        const setupDone = decodedToken.role === 'admin' ? true : decodedToken.quotaSetupComplete !== false;
+        setQuotaSetupComplete(setupDone);
+        if (setupDone) {
+          createSession(storedToken);
+        }
       } catch (err) {
         console.error('Failed to decode token:', err);
         handleLogout();
@@ -55,14 +181,17 @@ function App() {
         const decodedToken = jwtDecode(token);
         setUserRole(decodedToken.role);
         setUsername(decodedToken.username || null);
+        setQuotaSetupComplete(decodedToken.role === 'admin' ? true : decodedToken.quotaSetupComplete !== false);
       } catch (err) {
         console.error('Failed to decode token on update:', err);
         setUserRole(null);
         setUsername(null);
+        setQuotaSetupComplete(true);
       }
     } else {
       setUserRole(null);
       setUsername(null);
+      setQuotaSetupComplete(true);
     }
   }, [token]);
 
@@ -113,12 +242,16 @@ function App() {
       const decodedToken = jwtDecode(newToken);
       setUserRole(decodedToken.role);
       setUsername(decodedToken.username || null);
-      // Create a new session immediately after login
-      createSession(newToken);
+      const setupDone = decodedToken.role === 'admin' ? true : decodedToken.quotaSetupComplete !== false;
+      setQuotaSetupComplete(setupDone);
+      if (setupDone) {
+        createSession(newToken);
+      }
     } catch (err) {
       console.error('Failed to decode new token:', err);
       setUserRole(null);
       setUsername(null);
+      setQuotaSetupComplete(true);
     }
   };
 
@@ -129,6 +262,7 @@ function App() {
     setJupyterBase(null);
     setUserRole(null);
     setUsername(null);
+    setQuotaSetupComplete(true);
     setIframeLoaded(false);
   };
 
@@ -157,6 +291,12 @@ function App() {
     
     if (!currentToken) {
       setError('No authentication token found. Please log in.');
+      setLoading(false);
+      return;
+    }
+
+    if (userRole !== 'admin' && !quotaSetupComplete) {
+      setError('Complete your quota setup before launching notebook sessions.');
       setLoading(false);
       return;
     }
@@ -251,6 +391,7 @@ function App() {
   const userPath = username ? `/${username}` : '/';
   const userAdminPath = username ? `/${username}/admin` : '/';
   const userNotebookReviewPath = username ? `/${username}/admin/notebooks` : '/';
+  const userQuotaPath = username ? `/${username}/setup-quota` : '/';
   const isAdminDashboardRoute = /\/admin(\/notebooks)?\/?$/.test(window.location.pathname.toLowerCase());
 
   return (
@@ -285,8 +426,24 @@ function App() {
           )}
 
           <Routes>
-            <Route path="/" element={<Navigate to={userPath} replace />} />
+            <Route path="/" element={<Navigate to={quotaSetupComplete ? userPath : userQuotaPath} replace />} />
             <Route path="/admin" element={<Navigate to={userRole === 'admin' ? userAdminPath : userPath} replace />} />
+            <Route
+              path="/:routeUsername/setup-quota"
+              element={
+                userRole === 'admin' ? (
+                  <Navigate to={userPath} replace />
+                ) : (
+                  <UsernameRouteGuard username={username}>
+                    {quotaSetupComplete ? (
+                      <Navigate to={userPath} replace />
+                    ) : (
+                      <QuotaSetupCard token={token} onQuotaSaved={handleLogin} />
+                    )}
+                  </UsernameRouteGuard>
+                )
+              }
+            />
             <Route
               path="/:routeUsername/admin/notebooks"
               element={
@@ -315,8 +472,9 @@ function App() {
               path="/:routeUsername"
               element={
                 <UsernameRouteGuard username={username}>
-                  <div className="workspace-grid">
-                    <aside className="workspace-sidebar">
+                  {quotaSetupComplete ? (
+                    <div className="workspace-grid">
+                      <aside className="workspace-sidebar">
                       <section className="workspace-panel workspace-panel-primary">
                         <p className="workspace-label">Signed in as</p>
                         <h2 className="workspace-username">{username || 'Notebook User'}</h2>
@@ -368,10 +526,10 @@ function App() {
                           <li>Automatic proxy routing through the app gateway</li>
                         </ul>
                       </section>
-                    </aside>
+                      </aside>
 
-                    <section className="workspace-main">
-                      <div className="workspace-header-card">
+                      <section className="workspace-main">
+                        <div className="workspace-header-card">
                         <div>
                           <p className="workspace-label">Live notebook</p>
                           <h2 className="workspace-main-title">{iframeLoaded ? 'Jupyter Lab is ready' : 'Preparing your coding canvas'}</h2>
@@ -381,20 +539,20 @@ function App() {
                               : 'Start a fresh notebook session to open an isolated Jupyter Lab environment.'}
                           </p>
                         </div>
-                        <div className="workspace-url-chip">{sessionToken ? notebookUrl : 'Awaiting launch'}</div>
-                      </div>
+                          <div className="workspace-url-chip">{sessionToken ? notebookUrl : 'Awaiting launch'}</div>
+                        </div>
 
-                      {!sessionToken ? (
-                        <div className="workspace-empty-state">
+                        {!sessionToken ? (
+                          <div className="workspace-empty-state">
                           <div className="workspace-empty-icon">+</div>
                           <h3>Open your first session</h3>
                           <p>Spin up a dedicated notebook container and start working immediately.</p>
                           <button onClick={() => createSession()} disabled={loading} className="app-primary-button">
                             {loading ? 'Starting workspace...' : 'Create notebook session'}
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="workspace-frame-shell">
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="workspace-frame-shell">
                           {!iframeLoaded && (
                             <div className="workspace-loading-banner">
                               <div className="workspace-loading-orb" />
@@ -404,7 +562,7 @@ function App() {
                               </div>
                             </div>
                           )}
-                          <div className="workspace-frame-wrap">
+                            <div className="workspace-frame-wrap">
                             <iframe
                               key={sessionToken}
                               title="Jupyter Lab"
@@ -416,13 +574,16 @@ function App() {
                               className="workspace-frame"
                               allowFullScreen
                             />
+                            </div>
                           </div>
-                        </div>
-                      )}
+                        )}
 
-                      <CodeCoachPanel />
-                    </section>
-                  </div>
+                        <CodeCoachPanel />
+                      </section>
+                    </div>
+                  ) : (
+                    <Navigate to={userQuotaPath} replace />
+                  )}
                 </UsernameRouteGuard>
               }
             />

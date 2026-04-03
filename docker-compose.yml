@@ -36,8 +36,11 @@ services:
       - COLLEGE_DOMAIN=gla.ac.in
       - SMTP_HOST=smtp.gmail.com
       - SMTP_PORT=587
-      - SMTP_USER=moham77877897@gmail.com
-      - SMTP_PASS=lcoyowwnfbzpbqyr
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
+      - GEMINI_TIMEOUT_MS=${GEMINI_TIMEOUT_MS:-20000}
 
 volumes:
   notebooks_data:

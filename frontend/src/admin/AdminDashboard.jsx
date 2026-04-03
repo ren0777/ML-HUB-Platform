@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Link, useLocation } from 'react-router-dom';
 
 const REFRESH_INTERVAL_MS = 15000;
 
@@ -51,6 +52,7 @@ function UsageMeter({ label, used, free, percent, tone = 'accent' }) {
 }
 
 function AdminDashboard() {
+  const location = useLocation();
   const [users, setUsers] = useState([]);
   const [sessions, setSessions] = useState([]);
   const [analytics, setAnalytics] = useState(null);
@@ -318,6 +320,8 @@ function AdminDashboard() {
   const lastUpdated = analytics?.generatedAt
     ? new Date(analytics.generatedAt).toLocaleTimeString()
     : null;
+  const usernameFromRoute = location.pathname.split('/').filter(Boolean)[0] || '';
+  const notebookReviewPath = usernameFromRoute ? `/${usernameFromRoute}/admin/notebooks` : '/';
 
   return (
     <div className="admin-shell">
@@ -328,6 +332,9 @@ function AdminDashboard() {
           <p className="workspace-copy workspace-copy-wide">
             Create accounts, monitor active sessions, and keep the multi-container workspace under control from one place.
           </p>
+          <div className="admin-header-actions">
+            <Link to={notebookReviewPath} className="app-admin-link">Open users notebook review</Link>
+          </div>
         </div>
         <div className="admin-metrics">
           <div className="admin-metric-card">

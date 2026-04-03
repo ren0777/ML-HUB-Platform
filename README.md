@@ -57,6 +57,26 @@ docker build -t jupyter-singleuser:dev -f docker/Dockerfile.jupyter .
 docker compose up --build -d
 ```
 
+### 3.1 Enable Gemini Code Coach (Optional)
+
+To use the test-first code analysis coach locally, set your Gemini key before starting the stack.
+
+```bash
+# Linux/macOS
+export GEMINI_API_KEY="your_api_key"
+export GEMINI_MODEL="gemini-1.5-flash"
+
+# Windows PowerShell
+$env:GEMINI_API_KEY="your_api_key"
+$env:GEMINI_MODEL="gemini-1.5-flash"
+```
+
+Then restart backend:
+
+```bash
+docker compose up --build -d backend
+```
+
 ### 4. Access the Application
 
 - **Frontend**: http://localhost:3000
@@ -91,6 +111,23 @@ Log in with these credentials, then create additional users via the admin dashbo
 1. Go to Admin Dashboard → "Sessions" tab
 2. View active sessions, CPU/memory usage, and session duration
 3. Stop any session or delete a user (removes all their notebooks)
+
+### Review User Notebooks (Admin Invigilator)
+
+1. Log in as admin
+2. Open "Admin Dashboard"
+3. Click "Open users notebook review"
+4. Inspect notebook metadata and full notebook cell content on the dedicated review page
+
+### Analyze Code with Code Coach (User)
+
+1. Log in as a user and start a notebook session
+2. In workspace sidebar, open the "Code Coach" panel
+3. Paste Python code and optional pytest tests
+4. Click "Analyze code" to get:
+    - test-first verdict (correct/wrong)
+    - a quick hint
+    - Gemini explanation of wrong part and correction suggestions
 
 ### Stop the Stack
 

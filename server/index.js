@@ -8,6 +8,7 @@ const path = require('path');
 const k8s = require('@kubernetes/client-node');
 const Docker = require('dockerode');
 const nodemailer = require('nodemailer');
+const { PassThrough } = require('stream');
 
 const app = express();
 app.use(express.json());
@@ -44,10 +45,124 @@ const SMTP_PASS = process.env.SMTP_PASS || '';
 const OTP_EXPIRY_MS = 5 * 60 * 1000;
 const OTP_MAX_ATTEMPTS = 3;
 const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+const GEMINI_TIMEOUT_MS = parseInt(process.env.GEMINI_TIMEOUT_MS || '20000', 10);
+const MAX_ANALYSIS_SOURCE_LENGTH = parseInt(process.env.MAX_ANALYSIS_SOURCE_LENGTH || '25000', 10);
+
+const QUOTA_MIN_MEMORY_MI = parseInt(process.env.QUOTA_MIN_MEMORY_MI || '512', 10);
+const QUOTA_MAX_MEMORY_MI = parseInt(process.env.QUOTA_MAX_MEMORY_MI || '4096', 10);
+const QUOTA_DEFAULT_MEMORY_MI = parseInt(process.env.QUOTA_DEFAULT_MEMORY_MI || '1024', 10);
+const QUOTA_MEMORY_STEP_MI = parseInt(process.env.QUOTA_MEMORY_STEP_MI || '256', 10);
+
+const QUOTA_MIN_STORAGE_GI = parseInt(process.env.QUOTA_MIN_STORAGE_GI || '5', 10);
+const QUOTA_MAX_STORAGE_GI = parseInt(process.env.QUOTA_MAX_STORAGE_GI || '20', 10);
+const QUOTA_DEFAULT_STORAGE_GI = parseInt(process.env.QUOTA_DEFAULT_STORAGE_GI || '5', 10);
+const QUOTA_STORAGE_STEP_GI = parseInt(process.env.QUOTA_STORAGE_STEP_GI || '1', 10);
 
 let k8sCoreApi = null;
 let k8sAppsApi = null;
 let dockerApi = null;
+
+function isValidStep(value, min, step) {
+  return Number.isInteger((value - min) / step);
+}
+
+function validateQuotaInput(memoryMiRaw, storageGiRaw) {
+  const memoryMi = Number(memoryMiRaw);
+  const storageGi = Number(storageGiRaw);
+
+  if (!Number.isInteger(memoryMi) || !Number.isInteger(storageGi)) {
+    return { error: 'Memory and storage must be integer values.' };
+  }
+
+  if (memoryMi < QUOTA_MIN_MEMORY_MI || memoryMi > QUOTA_MAX_MEMORY_MI) {
+    return {
+      error: `Memory must be between ${QUOTA_MIN_MEMORY_MI}Mi and ${QUOTA_MAX_MEMORY_MI}Mi.`,
+    };
+  }
+
+  if (storageGi < QUOTA_MIN_STORAGE_GI || storageGi > QUOTA_MAX_STORAGE_GI) {
+    return {
+      error: `Storage must be between ${QUOTA_MIN_STORAGE_GI}Gi and ${QUOTA_MAX_STORAGE_GI}Gi.`,
+    };
+  }
+
+  if (!isValidStep(memoryMi, QUOTA_MIN_MEMORY_MI, QUOTA_MEMORY_STEP_MI)) {
+    return {
+      error: `Memory must increase in steps of ${QUOTA_MEMORY_STEP_MI}Mi.`,
+    };
+  }
+
+  if (!isValidStep(storageGi, QUOTA_MIN_STORAGE_GI, QUOTA_STORAGE_STEP_GI)) {
+    return {
+      error: `Storage must increase in steps of ${QUOTA_STORAGE_STEP_GI}Gi.`,
+    };
+  }
+
+  return {
+    memoryMi,
+    storageGi,
+    error: null,
+  };
+}
+
+function normalizeUserQuota(user) {
+  const memoryMi = Number.isInteger(user?.quota?.memoryMi)
+    ? Math.min(Math.max(user.quota.memoryMi, QUOTA_MIN_MEMORY_MI), QUOTA_MAX_MEMORY_MI)
+    : QUOTA_DEFAULT_MEMORY_MI;
+  const storageGi = Number.isInteger(user?.quota?.storageGi)
+    ? Math.min(Math.max(user.quota.storageGi, QUOTA_MIN_STORAGE_GI), QUOTA_MAX_STORAGE_GI)
+    : QUOTA_DEFAULT_STORAGE_GI;
+
+  return { memoryMi, storageGi };
+}
+
+function normalizeUserRecord(userData, options = {}) {
+  const normalized = { ...(userData || {}) };
+  const isNewUser = options.isNewUser === true;
+  const role = normalized.role || 'user';
+
+  const quota = normalizeUserQuota(normalized);
+  normalized.quota = quota;
+
+  if (role === 'admin') {
+    normalized.quotaSetupComplete = true;
+  } else if (typeof normalized.quotaSetupComplete !== 'boolean') {
+    normalized.quotaSetupComplete = isNewUser ? false : true;
+  }
+
+  return normalized;
+}
+
+function buildAuthToken(username, user) {
+  const quotaSetupComplete = user?.role === 'admin'
+    ? true
+    : user?.quotaSetupComplete !== false;
+
+  return jwt.sign(
+    {
+      username,
+      role: user?.role || 'user',
+      quotaSetupComplete,
+    },
+    JWT_SECRET,
+    { expiresIn: '7d' }
+  );
+}
+
+function getEffectiveQuotaForUser(username) {
+  const user = users.get(username) || {};
+  const { memoryMi, storageGi } = normalizeUserQuota(user);
+
+  return {
+    memoryMi,
+    storageGi,
+    memoryLimit: `${memoryMi}Mi`,
+    storageSize: `${storageGi}Gi`,
+    memoryLimitBytes: memoryMi * 1024 * 1024,
+  };
+}
 
 if (K8S_ENABLED) {
   const kc = new k8s.KubeConfig();
@@ -68,20 +183,28 @@ function loadUsers() {
     const data = fs.readFileSync(usersFilePath, 'utf-8');
     const usersArray = JSON.parse(data);
     users.clear();
+    let usersChanged = false;
     if (usersArray.length === 0) {
       // Create a default admin user if the user file is empty
       const hashedPassword = hashPassword('admin');
-      users.set('admin', { password: hashedPassword, role: 'admin' });
+      users.set('admin', normalizeUserRecord({ password: hashedPassword, role: 'admin' }));
       saveUsers();
     } else {
       usersArray.forEach(([username, userData]) => {
-        users.set(username, userData);
+        const normalizedUser = normalizeUserRecord(userData);
+        users.set(username, normalizedUser);
+        if (JSON.stringify(normalizedUser) !== JSON.stringify(userData)) {
+          usersChanged = true;
+        }
       });
+      if (usersChanged) {
+        saveUsers();
+      }
     }
   } else {
     // Create a default admin user if no user file exists
     const hashedPassword = hashPassword('admin');
-    users.set('admin', { password: hashedPassword, role: 'admin' });
+    users.set('admin', normalizeUserRecord({ password: hashedPassword, role: 'admin' }));
     saveUsers();
   }
 }
@@ -211,19 +334,28 @@ async function sendOtpEmail(email, otp) {
 }
 
 // Auth routes
-// Middleware to require admin role
-function requiresAdmin(req, res, next) {
+function requiresAuth(req, res, next) {
   const token = req.headers.authorization?.split(" ")[1];
   if (!token) return res.status(401).json({ message: 'Missing token' });
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    if (decoded.role !== "admin") return res.status(403).json({ message: "Forbidden" });
     req.user = decoded; // Attach user info to request
     next();
-  } catch {
+  } catch (err) {
     res.status(401).json({ message: 'Invalid token' });
   }
+}
+
+// Middleware to require admin role
+function requiresAdmin(req, res, next) {
+  requiresAuth(req, res, () => {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+
+    return next();
+  });
 }
 
 function sanitizeName(value) {
@@ -565,6 +697,313 @@ function findSessionEntryByUser(username) {
   return null;
 }
 
+function resolveSafeNotebookPath(username, notebookPath = '') {
+  const userRoot = path.resolve(path.join(notebooksDir, username));
+  const targetPath = path.resolve(path.join(userRoot, notebookPath));
+
+  if (!targetPath.startsWith(userRoot)) {
+    throw new Error('Invalid notebook path');
+  }
+
+  return { userRoot, targetPath };
+}
+
+async function listLocalNotebookFilesForUser(username) {
+  const { userRoot } = resolveSafeNotebookPath(username);
+  if (!fs.existsSync(userRoot)) {
+    return [];
+  }
+
+  const notebooks = [];
+  const stack = [''];
+
+  while (stack.length > 0) {
+    const relDir = stack.pop();
+    const currentPath = path.join(userRoot, relDir);
+    const entries = await fs.promises.readdir(currentPath, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const nextRel = relDir ? path.join(relDir, entry.name) : entry.name;
+      const posixRel = nextRel.split(path.sep).join('/');
+
+      if (entry.isDirectory()) {
+        stack.push(nextRel);
+        continue;
+      }
+
+      if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.ipynb')) {
+        continue;
+      }
+
+      const stats = await fs.promises.stat(path.join(userRoot, nextRel));
+      notebooks.push({
+        id: Buffer.from(`${username}:local:${posixRel}`).toString('base64url'),
+        username,
+        source: 'local',
+        notebookPath: posixRel,
+        name: entry.name,
+        sizeBytes: stats.size,
+        updatedAt: stats.mtimeMs,
+      });
+    }
+  }
+
+  return notebooks.sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+async function fetchLiveNotebookDirectory(session, relativePath = '') {
+  const encodedSegments = relativePath
+    .split('/')
+    .filter(Boolean)
+    .map((segment) => encodeURIComponent(segment));
+  const routePath = encodedSegments.length > 0 ? `/${encodedSegments.join('/')}` : '';
+  const url = `${session.target}${session.baseUrl}/api/contents${routePath}?content=1`;
+
+  const response = await fetch(url, { method: 'GET' });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch notebook listing from Jupyter: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+async function listLiveNotebookFilesForUser(username) {
+  const sessionEntry = findSessionEntryByUser(username);
+  if (!sessionEntry?.session) {
+    return [];
+  }
+
+  const queue = [''];
+  const notebooks = [];
+
+  while (queue.length > 0) {
+    const rel = queue.shift();
+    const payload = await fetchLiveNotebookDirectory(sessionEntry.session, rel);
+    const content = Array.isArray(payload?.content) ? payload.content : [];
+
+    for (const item of content) {
+      const itemPath = typeof item?.path === 'string' ? item.path : '';
+      if (!itemPath) {
+        continue;
+      }
+
+      if (item?.type === 'directory') {
+        queue.push(itemPath);
+        continue;
+      }
+
+      if (item?.type !== 'notebook') {
+        continue;
+      }
+
+      notebooks.push({
+        id: Buffer.from(`${username}:live:${itemPath}`).toString('base64url'),
+        username,
+        source: 'live',
+        notebookPath: itemPath,
+        name: path.basename(itemPath),
+        sizeBytes: Number(item?.size) || 0,
+        updatedAt: item?.last_modified ? new Date(item.last_modified).getTime() : Date.now(),
+      });
+    }
+  }
+
+  return notebooks.sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+function collectQuickHint(stderr = '', stdout = '') {
+  const combined = `${stderr}\n${stdout}`.toLowerCase();
+
+  if (combined.includes('assert')) {
+    return 'At least one assertion failed. Check expected output and edge-case handling in your function.';
+  }
+
+  if (combined.includes('syntaxerror')) {
+    return 'There is a syntax error. Verify indentation, colons, and unmatched brackets in your Python code.';
+  }
+
+  if (combined.includes('modulenotfounderror')) {
+    return 'A required module is missing. Install/import dependencies or adjust your test imports.';
+  }
+
+  if (combined.includes('nameerror')) {
+    return 'A variable or function name is not defined. Double-check naming consistency and scope.';
+  }
+
+  return 'Tests failed. Start by fixing the first visible error and rerun until all tests pass.';
+}
+
+async function runDockerExec(containerName, command, env = [], timeoutMs = 20000) {
+  const container = dockerApi.getContainer(containerName);
+  const exec = await container.exec({
+    Cmd: ['bash', '-lc', command],
+    AttachStdout: true,
+    AttachStderr: true,
+    Env: env,
+    Tty: false,
+  });
+
+  const stream = await exec.start({ hijack: true, stdin: false });
+  const stdoutStream = new PassThrough();
+  const stderrStream = new PassThrough();
+  let stdout = '';
+  let stderr = '';
+
+  stdoutStream.on('data', (chunk) => {
+    stdout += chunk.toString('utf8');
+  });
+  stderrStream.on('data', (chunk) => {
+    stderr += chunk.toString('utf8');
+  });
+
+  dockerApi.modem.demuxStream(stream, stdoutStream, stderrStream);
+
+  const timeoutId = setTimeout(() => {
+    try {
+      stream.destroy(new Error('Execution timed out'));
+    } catch (err) {
+      // Ignore stream teardown errors.
+    }
+  }, timeoutMs);
+
+  try {
+    await new Promise((resolve, reject) => {
+      stream.on('end', resolve);
+      stream.on('error', reject);
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  const inspect = await exec.inspect();
+  return {
+    exitCode: Number.isFinite(inspect?.ExitCode) ? inspect.ExitCode : 1,
+    stdout,
+    stderr,
+  };
+}
+
+async function runPythonSubmissionChecks(user, sourceCode, testCode = '') {
+  const sessionEntry = findSessionEntryByUser(user);
+  if (!sessionEntry?.session || sessionEntry.session.mode !== 'docker') {
+    throw new Error('Start a notebook session first to run code analysis checks.');
+  }
+
+  const safeCode = String(sourceCode || '').slice(0, MAX_ANALYSIS_SOURCE_LENGTH);
+  const safeTests = String(testCode || '').slice(0, MAX_ANALYSIS_SOURCE_LENGTH);
+  const encodedCode = Buffer.from(safeCode, 'utf8').toString('base64');
+  const encodedTests = Buffer.from(safeTests, 'utf8').toString('base64');
+  const hasTests = safeTests.trim().length > 0;
+  const script = [
+    'set -e',
+    'WORKDIR=/home/jovyan/work/.mlhub-review',
+    'mkdir -p "$WORKDIR"',
+    'echo "$MLHUB_CODE_B64" | base64 -d > "$WORKDIR/submission.py"',
+    'if [ -n "$MLHUB_TEST_B64" ]; then echo "$MLHUB_TEST_B64" | base64 -d > "$WORKDIR/test_submission.py"; fi',
+    'python -m py_compile "$WORKDIR/submission.py"',
+    hasTests ? 'python -m pytest -q "$WORKDIR/test_submission.py"' : 'python "$WORKDIR/submission.py"',
+  ].join(' && ');
+
+  return runDockerExec(
+    sessionEntry.session.containerName,
+    script,
+    [`MLHUB_CODE_B64=${encodedCode}`, `MLHUB_TEST_B64=${encodedTests}`],
+    25000
+  );
+}
+
+async function callGeminiForFeedback({ code, tests, execution }) {
+  if (!GEMINI_API_KEY) {
+    return {
+      explanation: 'Gemini API key is not configured. Set GEMINI_API_KEY to enable AI explanations.',
+      suggestions: ['Configure GEMINI_API_KEY and retry analysis.'],
+    };
+  }
+
+  const prompt = [
+    'You are a strict coding coach.',
+    'Given the execution result below, explain the first wrong part clearly and suggest concrete corrections.',
+    'Return valid JSON only: {"explanation":"...","suggestions":["...","..."]}.',
+    '',
+    'SUBMISSION:',
+    code.slice(0, 6000),
+    '',
+    'TESTS:',
+    tests.slice(0, 6000),
+    '',
+    `EXIT_CODE: ${execution.exitCode}`,
+    'STDOUT:',
+    execution.stdout.slice(-6000),
+    'STDERR:',
+    execution.stderr.slice(-6000),
+  ].join('\n');
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
+
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 700,
+        },
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: prompt }],
+          },
+        ],
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Gemini request failed with status ${response.status}`);
+    }
+
+    const payload = await response.json();
+    const rawText = payload?.candidates?.[0]?.content?.parts?.map((part) => part?.text || '').join('\n').trim();
+    if (!rawText) {
+      return {
+        explanation: 'AI explanation was empty. Review test output and fix the first failing assertion.',
+        suggestions: ['Rerun after fixing the earliest visible error.'],
+      };
+    }
+
+    let parsed = null;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch (err) {
+      const match = rawText.match(/\{[\s\S]*\}/);
+      if (match) {
+        parsed = JSON.parse(match[0]);
+      }
+    }
+
+    if (!parsed || typeof parsed !== 'object') {
+      return {
+        explanation: rawText,
+        suggestions: [],
+      };
+    }
+
+    const suggestions = Array.isArray(parsed.suggestions)
+      ? parsed.suggestions.map((entry) => String(entry)).filter(Boolean).slice(0, 6)
+      : [];
+
+    return {
+      explanation: String(parsed.explanation || rawText),
+      suggestions,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function ensureDockerSessionAvailable(sessionId, session) {
   const container = dockerApi.getContainer(session.containerName);
   const inspect = await container.inspect();
@@ -679,7 +1118,7 @@ async function waitForNotebookReady(target, baseUrl, timeoutMs = 60000) {
   throw new Error(`Notebook did not become ready in time: ${readinessUrl}`);
 }
 
-async function ensureUserPvc(username) {
+async function ensureUserPvc(username, storageSize) {
   const pvcName = buildResourceName(`nb-${username}`, 'pvc');
   try {
     await k8sCoreApi.readNamespacedPersistentVolumeClaim(pvcName, K8S_NAMESPACE);
@@ -705,7 +1144,7 @@ async function ensureUserPvc(username) {
       accessModes: ['ReadWriteOnce'],
       resources: {
         requests: {
-          storage: NOTEBOOK_PVC_SIZE,
+          storage: storageSize || NOTEBOOK_PVC_SIZE,
         },
       },
     },
@@ -723,10 +1162,11 @@ async function ensureUserPvc(username) {
 }
 
 async function createNotebookResources(sessionId, username) {
+  const quota = getEffectiveQuotaForUser(username);
   const baseName = sanitizeName(`nb-${username}-${sessionId.slice(0, 6)}`) || `nb-${sessionId.slice(0, 6)}`;
   const deploymentName = buildResourceName(baseName, 'dep');
   const serviceName = buildResourceName(baseName, 'svc');
-  const pvcName = await ensureUserPvc(username);
+  const pvcName = await ensureUserPvc(username, quota.storageSize);
   const notebookBaseUrl = buildNotebookBaseUrl(sessionId);
   const publicBaseUrl = buildPublicBaseUrl(sessionId);
 
@@ -779,7 +1219,7 @@ async function createNotebookResources(sessionId, username) {
                 },
                 limits: {
                   cpu: NOTEBOOK_CPU_LIMIT,
-                  memory: NOTEBOOK_MEM_LIMIT,
+                  memory: quota.memoryLimit,
                 },
               },
               volumeMounts: [
@@ -866,6 +1306,7 @@ async function ensureDockerVolume(volumeName) {
 }
 
 async function createDockerNotebookResources(sessionId, username) {
+  const quota = getEffectiveQuotaForUser(username);
   const containerName = buildResourceName(`nb-${username}-${sessionId.slice(0, 8)}`, 'ctr');
   const volumeName = buildResourceName(`nb-${username}`, 'vol');
   const notebookBaseUrl = buildNotebookBaseUrl(sessionId);
@@ -889,6 +1330,8 @@ async function createDockerNotebookResources(sessionId, username) {
     HostConfig: {
       NetworkMode: DOCKER_NOTEBOOK_NETWORK,
       Binds: [`${volumeName}:${NOTEBOOK_ROOT_DIR}`],
+      Memory: quota.memoryLimitBytes,
+      MemoryReservation: Math.min(parseMemoryValueToBytes(NOTEBOOK_MEM_REQUEST), quota.memoryLimitBytes),
       RestartPolicy: {
         Name: 'unless-stopped',
       },
@@ -1038,13 +1481,13 @@ app.post('/auth/signup/verify-otp', (req, res) => {
 
   // OTP verified, create user
   const { username, passwordHash, email: userEmail } = verificationData;
-  const userObject = {
+  const userObject = normalizeUserRecord({
     password: passwordHash,
     role: 'user',
     email: userEmail,
     verified: true,
-    verifiedAt: new Date().toISOString()
-  };
+    verifiedAt: new Date().toISOString(),
+  }, { isNewUser: true });
 
   users.set(username, userObject);
   saveUsers();
@@ -1057,9 +1500,9 @@ app.post('/auth/signup/verify-otp', (req, res) => {
 
   otpVerifications.delete(email.toLowerCase());
 
-  const token = jwt.sign({ username, role: userObject.role }, JWT_SECRET, { expiresIn: '7d' });
+  const token = buildAuthToken(username, userObject);
   emitEvent('user_added', { username, role: userObject.role }, { toRole: 'admin' });
-  res.json({ token });
+  res.json({ token, needsQuotaSetup: userObject.quotaSetupComplete === false });
 });
 
 app.post('/auth/signup', (req, res) => {
@@ -1068,9 +1511,10 @@ app.post('/auth/signup', (req, res) => {
     return res.status(400).json({ message: 'User already exists' });
   }
   const hashedPassword = hashPassword(password);
-  const userObject = { password: hashedPassword, role: "user" }; // Default role
+  const userObject = normalizeUserRecord({ password: hashedPassword, role: "user" }, { isNewUser: true }); // Default role
   if (username === "admin") { // Assign admin role for "admin" user
     userObject.role = "admin";
+    userObject.quotaSetupComplete = true;
   }
   users.set(username, userObject);
   saveUsers(); // Save users after signup
@@ -1081,7 +1525,7 @@ app.post('/auth/signup', (req, res) => {
     fs.mkdirSync(userNotebooksDir);
   }
 
-  const token = jwt.sign({ username, role: userObject.role }, JWT_SECRET, { expiresIn: '7d' }); // Include role in token
+  const token = buildAuthToken(username, userObject);
   emitEvent('user_added', { username, role: userObject.role }, { toRole: 'admin' });
   res.json({ token });
 });
@@ -1094,8 +1538,43 @@ app.post('/auth/login', (req, res) => {
   if (!user || !verifyPassword(password, user.password)) {
     return res.status(401).json({ message: 'Invalid credentials' });
   }
-  const token = jwt.sign({ username, role: user.role }, JWT_SECRET, { expiresIn: '7d' }); // Include role in token
+  const token = buildAuthToken(username, user);
   res.json({ token });
+});
+
+app.post('/auth/quota', requiresAuth, (req, res) => {
+  const username = req.user.username;
+  const user = users.get(username);
+
+  if (!user) {
+    return res.status(404).json({ message: 'User not found' });
+  }
+
+  if (user.role === 'admin') {
+    return res.status(400).json({ message: 'Quota setup is not required for admin accounts.' });
+  }
+
+  const { memoryMi, storageGi } = req.body || {};
+  const validated = validateQuotaInput(memoryMi, storageGi);
+  if (validated.error) {
+    return res.status(400).json({ message: validated.error });
+  }
+
+  user.quota = {
+    memoryMi: validated.memoryMi,
+    storageGi: validated.storageGi,
+    updatedAt: new Date().toISOString(),
+  };
+  user.quotaSetupComplete = true;
+  users.set(username, user);
+  saveUsers();
+
+  const token = buildAuthToken(username, user);
+  res.json({
+    token,
+    quotaSetupComplete: true,
+    quota: user.quota,
+  });
 });
 
 app.get('/auth/profile', (req, res) => {
@@ -1116,7 +1595,9 @@ app.get('/auth/profile', (req, res) => {
       role: user.role,
       email: user.email || null,
       verified: user.verified || false,
-      verifiedAt: user.verifiedAt || null
+      verifiedAt: user.verifiedAt || null,
+      quotaSetupComplete: user.role === 'admin' ? true : user.quotaSetupComplete !== false,
+      quota: normalizeUserQuota(user),
     });
   } catch (err) {
     res.status(401).json({ message: 'Invalid token' });
@@ -1181,6 +1662,15 @@ app.post('/session/new', async (req, res) => {
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     const user = decoded.username; // Use username from decoded token
+    const userRecord = users.get(user);
+
+    if (!userRecord) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    if (userRecord.role !== 'admin' && userRecord.quotaSetupComplete === false) {
+      return res.status(403).json({ message: 'Complete quota setup before launching your workspace.' });
+    }
 
     const existingEntry = findSessionEntryByUser(user);
     if (existingEntry) {
@@ -1354,6 +1844,147 @@ app.get('/admin/user-usage', requiresAdmin, async (req, res) => {
   } catch (err) {
     console.error('Failed to build per-user usage analytics:', err);
     res.status(500).json({ message: 'Failed to load per-user usage analytics' });
+  }
+});
+
+app.get('/admin/notebooks', requiresAdmin, async (req, res) => {
+  try {
+    const requestedUsername = typeof req.query.username === 'string' ? req.query.username.trim() : '';
+    const targetUsers = requestedUsername ? [requestedUsername] : Array.from(users.keys());
+
+    if (requestedUsername && !users.has(requestedUsername)) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const items = [];
+    for (const username of targetUsers) {
+      let localItems = [];
+      let liveItems = [];
+
+      try {
+        localItems = await listLocalNotebookFilesForUser(username);
+      } catch (err) {
+        localItems = [];
+      }
+
+      try {
+        liveItems = await listLiveNotebookFilesForUser(username);
+      } catch (err) {
+        liveItems = [];
+      }
+
+      const dedup = new Map();
+      [...localItems, ...liveItems].forEach((item) => {
+        const key = `${item.username}:${item.notebookPath}`;
+        if (!dedup.has(key) || dedup.get(key).source === 'local') {
+          dedup.set(key, item);
+        }
+      });
+
+      items.push(...dedup.values());
+    }
+
+    items.sort((left, right) => right.updatedAt - left.updatedAt);
+    res.json({ generatedAt: Date.now(), items });
+  } catch (err) {
+    console.error('Failed to load admin notebook index:', err);
+    res.status(500).json({ message: 'Failed to load notebooks' });
+  }
+});
+
+app.get('/admin/notebook-content', requiresAdmin, async (req, res) => {
+  const username = typeof req.query.username === 'string' ? req.query.username.trim() : '';
+  const notebookPath = typeof req.query.notebookPath === 'string' ? req.query.notebookPath.trim() : '';
+  const source = req.query.source === 'live' ? 'live' : 'local';
+
+  if (!username || !notebookPath) {
+    return res.status(400).json({ message: 'username and notebookPath are required' });
+  }
+
+  if (!users.has(username)) {
+    return res.status(404).json({ message: 'User not found' });
+  }
+
+  try {
+    if (source === 'live') {
+      const sessionEntry = findSessionEntryByUser(username);
+      if (!sessionEntry?.session) {
+        return res.status(404).json({ message: 'No live session found for this user' });
+      }
+
+      const encodedSegments = notebookPath
+        .split('/')
+        .filter(Boolean)
+        .map((segment) => encodeURIComponent(segment));
+      const routePath = encodedSegments.length > 0 ? `/${encodedSegments.join('/')}` : '';
+      const url = `${sessionEntry.session.target}${sessionEntry.session.baseUrl}/api/contents${routePath}?content=1`;
+      const response = await fetch(url, { method: 'GET' });
+
+      if (!response.ok) {
+        return res.status(response.status).json({ message: 'Failed to read notebook from live session' });
+      }
+
+      const payload = await response.json();
+      const notebook = payload?.type === 'notebook' && payload?.content ? payload.content : payload;
+      return res.json({ source: 'live', username, notebookPath, notebook });
+    }
+
+    const { targetPath } = resolveSafeNotebookPath(username, notebookPath);
+    if (!fs.existsSync(targetPath)) {
+      return res.status(404).json({ message: 'Notebook not found' });
+    }
+
+    const raw = await fs.promises.readFile(targetPath, 'utf8');
+    const notebook = JSON.parse(raw);
+    res.json({ source: 'local', username, notebookPath, notebook });
+  } catch (err) {
+    console.error('Failed to load notebook content:', err);
+    res.status(500).json({ message: 'Failed to load notebook content' });
+  }
+});
+
+app.post('/code-analysis', requiresAuth, async (req, res) => {
+  const code = typeof req.body?.code === 'string' ? req.body.code : '';
+  const tests = typeof req.body?.tests === 'string' ? req.body.tests : '';
+  const language = typeof req.body?.language === 'string' ? req.body.language.toLowerCase() : 'python';
+
+  if (!code.trim()) {
+    return res.status(400).json({ message: 'Code is required for analysis.' });
+  }
+
+  if (language !== 'python') {
+    return res.status(400).json({ message: 'Only python analysis is supported right now.' });
+  }
+
+  try {
+    const execution = await runPythonSubmissionChecks(req.user.username, code, tests);
+    const passed = execution.exitCode === 0;
+    const hint = passed
+      ? 'Great work. Tests passed for this submission.'
+      : collectQuickHint(execution.stderr, execution.stdout);
+
+    const ai = await callGeminiForFeedback({ code, tests, execution });
+
+    return res.json({
+      verdict: passed ? 'correct' : 'wrong',
+      language,
+      hint,
+      explanation: ai.explanation,
+      suggestions: ai.suggestions,
+      testRun: {
+        passed,
+        exitCode: execution.exitCode,
+        stdout: execution.stdout.slice(-4000),
+        stderr: execution.stderr.slice(-4000),
+      },
+    });
+  } catch (err) {
+    console.error('Code analysis failed:', err);
+    return res.status(500).json({
+      verdict: 'error',
+      message: err?.message || 'Failed to analyse code.',
+      hint: 'Ensure your notebook session is running before triggering analysis.',
+    });
   }
 });
 

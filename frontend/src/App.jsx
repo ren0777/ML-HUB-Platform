@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, Navigate, useParams } from 'react-router-dom';
 import Login from './Login';
 import AdminDashboard from './admin/AdminDashboard';
+import AdminNotebookReview from './admin/AdminNotebookReview';
+import CodeCoachPanel from './CodeCoachPanel';
 import { jwtDecode } from 'jwt-decode';
 
 function UsernameRouteGuard({ username, children }) {
@@ -19,7 +21,7 @@ function UsernameRouteGuard({ username, children }) {
 }
 
 function App() {
-  const [token, setToken] = useState(null);
+  const [token, setToken] = useState(() => localStorage.getItem('token'));
   const [sessionToken, setSessionToken] = useState(null);
   const [jupyterBase, setJupyterBase] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -27,6 +29,7 @@ function App() {
   const [userRole, setUserRole] = useState(null);
   const [username, setUsername] = useState(null);
   const [iframeLoaded, setIframeLoaded] = useState(false);
+  const [authReady, setAuthReady] = useState(false);
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -42,6 +45,8 @@ function App() {
         handleLogout();
       }
     }
+
+    setAuthReady(true);
   }, []);
 
   useEffect(() => {
@@ -222,6 +227,15 @@ function App() {
     return () => clearTimeout(timeout);
   }, [sessionToken, iframeLoaded]);
 
+  if (!authReady) {
+    return (
+      <div className="admin-loading-state" style={{ margin: '2rem' }}>
+        <div className="workspace-loading-orb" />
+        <span>Restoring session...</span>
+      </div>
+    );
+  }
+
   if (!token) {
     return (
       <Router>
@@ -236,7 +250,8 @@ function App() {
   const notebookUrl = `${jupyterBase || `/jupyter/${sessionToken}`}/lab`;
   const userPath = username ? `/${username}` : '/';
   const userAdminPath = username ? `/${username}/admin` : '/';
-  const isAdminDashboardRoute = /\/admin\/?$/.test(window.location.pathname.toLowerCase());
+  const userNotebookReviewPath = username ? `/${username}/admin/notebooks` : '/';
+  const isAdminDashboardRoute = /\/admin(\/notebooks)?\/?$/.test(window.location.pathname.toLowerCase());
 
   return (
     <Router>
@@ -250,7 +265,10 @@ function App() {
           </div>
           <div className="app-topbar-actions">
             {userRole === 'admin' && (
-              <Link to={userAdminPath} className="app-admin-link">Admin Dashboard</Link>
+              <>
+                <Link to={userAdminPath} className="app-admin-link">Admin Dashboard</Link>
+                <Link to={userNotebookReviewPath} className="app-admin-link">User Notebooks</Link>
+              </>
             )}
             <button onClick={handleLogout} className="app-ghost-button">
               Logout
@@ -269,6 +287,18 @@ function App() {
           <Routes>
             <Route path="/" element={<Navigate to={userPath} replace />} />
             <Route path="/admin" element={<Navigate to={userRole === 'admin' ? userAdminPath : userPath} replace />} />
+            <Route
+              path="/:routeUsername/admin/notebooks"
+              element={
+                userRole === 'admin' ? (
+                  <UsernameRouteGuard username={username}>
+                    <AdminNotebookReview />
+                  </UsernameRouteGuard>
+                ) : (
+                  <Navigate to={userPath} replace />
+                )
+              }
+            />
             <Route
               path="/:routeUsername/admin"
               element={
@@ -389,6 +419,8 @@ function App() {
                           </div>
                         </div>
                       )}
+
+                      <CodeCoachPanel />
                     </section>
                   </div>
                 </UsernameRouteGuard>

@@ -507,10 +507,36 @@ async function getDockerContainerMemoryUsage(containerName) {
   }
 }
 
-async function getDockerVolumeUsage(volumeName) {
+function getUserStorageQuotaBytes(username) {
+  if (!username) {
+    return 0;
+  }
+
+  const quota = getEffectiveQuotaForUser(username);
+  return quota.storageGi * (1024 ** 3);
+}
+
+async function getDockerContainerWritableUsage(containerName) {
+  if (!containerName) {
+    return null;
+  }
+
+  try {
+    const container = dockerApi.getContainer(containerName);
+    const inspect = await container.inspect({ size: true });
+    const sizeRw = Number(inspect?.SizeRw);
+    return Number.isFinite(sizeRw) && sizeRw >= 0 ? sizeRw : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+async function getDockerVolumeUsage(volumeName, username) {
   if (!volumeName) {
     return null;
   }
+
+  const requestedBytes = getUserStorageQuotaBytes(username);
 
   try {
     const volume = await dockerApi.getVolume(volumeName).inspect();
@@ -522,6 +548,7 @@ async function getDockerVolumeUsage(volumeName) {
         mode: 'docker-volume',
         volumeName,
         usedBytes: size,
+        requestedBytes,
         refCount: Number.isFinite(refCount) ? refCount : null,
       };
     }
@@ -530,6 +557,7 @@ async function getDockerVolumeUsage(volumeName) {
       mode: 'docker-volume',
       volumeName,
       usedBytes: null,
+      requestedBytes,
       refCount: Number.isFinite(refCount) ? refCount : null,
       message: 'Volume size metrics are unavailable from Docker in this environment.',
     };
@@ -542,6 +570,7 @@ async function getDockerVolumeUsage(volumeName) {
       mode: 'docker-volume',
       volumeName,
       usedBytes: null,
+      requestedBytes,
       message: 'Failed to inspect Docker volume usage.',
     };
   }
@@ -592,7 +621,32 @@ async function getPerUserResourceUsage(username) {
     storage = await getK8sPvcUsage(username);
   } else {
     const volumeName = activeSession?.volumeName || buildResourceName(`nb-${username}`, 'vol');
-    storage = await getDockerVolumeUsage(volumeName);
+    storage = await getDockerVolumeUsage(volumeName, username);
+
+    const writableLayerUsedBytes = await getDockerContainerWritableUsage(activeSession?.containerName);
+    const volumeUsedBytes = Number.isFinite(storage?.usedBytes) ? storage.usedBytes : null;
+    const combinedParts = [volumeUsedBytes, writableLayerUsedBytes].filter(
+      (value) => Number.isFinite(value) && value >= 0
+    );
+    const combinedUsedBytes = combinedParts.length > 0
+      ? combinedParts.reduce((sum, value) => sum + value, 0)
+      : null;
+
+    storage = {
+      ...(storage || {
+        mode: 'docker-volume',
+        volumeName,
+        requestedBytes: getUserStorageQuotaBytes(username),
+      }),
+      usedBytes: combinedUsedBytes,
+      volumeUsedBytes,
+      writableLayerUsedBytes,
+      message: storage?.message || null,
+    };
+
+    if (storage?.message && writableLayerUsedBytes !== null) {
+      storage.message = `${storage.message} Showing writable-layer usage in the meantime.`;
+    }
   }
 
   return {
@@ -912,7 +966,15 @@ async function runPythonSubmissionChecks(user, sourceCode, testCode = '') {
   );
 }
 
-async function callGeminiForFeedback({ code, tests, execution }) {
+function normalizeCoachingMode(rawMode) {
+  const mode = String(rawMode || 'full').toLowerCase();
+  if (mode === 'hint' || mode === 'step' || mode === 'full') {
+    return mode;
+  }
+  return 'full';
+}
+
+async function callGeminiForFeedback({ code, tests, execution, coachingMode = 'full' }) {
   if (!GEMINI_API_KEY) {
     return {
       explanation: 'Gemini API key is not configured. Set GEMINI_API_KEY to enable AI explanations.',
@@ -920,10 +982,33 @@ async function callGeminiForFeedback({ code, tests, execution }) {
     };
   }
 
+  const mode = normalizeCoachingMode(coachingMode);
+  const modeInstructions = {
+    hint: [
+      'COACHING MODE: HINT ONLY.',
+      'Do not provide full solution steps.',
+      'Give a short directional hint and up to 2 concise suggestions.',
+      'Keep explanation under 2 short sentences.',
+    ],
+    step: [
+      'COACHING MODE: STEP-BY-STEP.',
+      'Provide a numbered sequence of concrete debugging/fix steps.',
+      'Keep it focused and actionable.',
+      'Return 3 to 6 suggestions where each is a single step.',
+    ],
+    full: [
+      'COACHING MODE: FULL EXPLANATION.',
+      'Explain the root cause, what is wrong, and exactly how to fix it.',
+      'Include important edge cases and implementation notes when useful.',
+      'Return up to 6 suggestions with practical corrections.',
+    ],
+  };
+
   const prompt = [
     'You are a strict coding coach.',
     'Given the execution result below, explain the first wrong part clearly and suggest concrete corrections.',
     'Return valid JSON only: {"explanation":"...","suggestions":["...","..."]}.',
+    ...modeInstructions[mode],
     '',
     'SUBMISSION:',
     code.slice(0, 6000),
@@ -1684,9 +1769,11 @@ app.get('/events', (req, res) => {
 // API route
 app.post('/session/new', async (req, res) => {
   const { token } = req.body;
+  let requestedUser = null;
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     const user = decoded.username; // Use username from decoded token
+    requestedUser = user;
     const userRecord = users.get(user);
 
     if (!userRecord) {
@@ -1773,6 +1860,31 @@ app.post('/session/new', async (req, res) => {
     res.json({ sessionToken: proxyToken, jupyterBase: publicBaseUrl });
   } catch (err) {
     console.error('Failed to create or restore notebook session:', err);
+
+    emitEvent(
+      'session_start_failed',
+      {
+        user: requestedUser,
+        message: err?.message || 'Failed to create or restore notebook session',
+      },
+      {
+        toRole: 'admin',
+      }
+    );
+
+    if (requestedUser) {
+      emitEvent(
+        'session_start_failed',
+        {
+          user: requestedUser,
+          message: err?.message || 'Failed to create or restore notebook session',
+        },
+        {
+          toUsernames: [requestedUser],
+        }
+      );
+    }
+
     if (err?.message === 'Invalid or expired token' || err?.name === 'JsonWebTokenError' || err?.name === 'TokenExpiredError') {
       return res.status(401).json({ message: 'Invalid or expired token' });
     }
@@ -1972,6 +2084,7 @@ app.post('/code-analysis', requiresAuth, async (req, res) => {
   const code = typeof req.body?.code === 'string' ? req.body.code : '';
   const tests = typeof req.body?.tests === 'string' ? req.body.tests : '';
   const language = typeof req.body?.language === 'string' ? req.body.language.toLowerCase() : 'python';
+  const coachingMode = normalizeCoachingMode(req.body?.coachingMode);
 
   if (!code.trim()) {
     return res.status(400).json({ message: 'Code is required for analysis.' });
@@ -1988,11 +2101,12 @@ app.post('/code-analysis', requiresAuth, async (req, res) => {
       ? 'Great work. Tests passed for this submission.'
       : collectQuickHint(execution.stderr, execution.stdout);
 
-    const ai = await callGeminiForFeedback({ code, tests, execution });
+    const ai = await callGeminiForFeedback({ code, tests, execution, coachingMode });
 
     return res.json({
       verdict: passed ? 'correct' : 'wrong',
       language,
+      coachingMode,
       hint,
       explanation: ai.explanation,
       suggestions: ai.suggestions,
@@ -2005,6 +2119,31 @@ app.post('/code-analysis', requiresAuth, async (req, res) => {
     });
   } catch (err) {
     console.error('Code analysis failed:', err);
+
+    emitEvent(
+      'code_analysis_failed',
+      {
+        user: req.user?.username || null,
+        message: err?.message || 'Failed to analyse code.',
+      },
+      {
+        toRole: 'admin',
+      }
+    );
+
+    if (req.user?.username) {
+      emitEvent(
+        'code_analysis_failed',
+        {
+          user: req.user.username,
+          message: err?.message || 'Failed to analyse code.',
+        },
+        {
+          toUsernames: [req.user.username],
+        }
+      );
+    }
+
     return res.status(500).json({
       verdict: 'error',
       message: err?.message || 'Failed to analyse code.',

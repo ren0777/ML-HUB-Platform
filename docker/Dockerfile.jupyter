@@ -6,7 +6,9 @@ ENV NOTEBOOK_BASE_URL=/jupyter
 ENV NOTEBOOK_ROOT_DIR=/home/jovyan/work
 
 RUN pip install --no-cache-dir \
-    scikit-learn pandas numpy matplotlib seaborn flask
+    "numpy<2" \
+    scikit-learn pandas matplotlib seaborn flask \
+    tensorflow==2.17.1
 
 COPY --chmod=755 docker/mlhub-start.sh /usr/local/bin/mlhub-start.sh
 

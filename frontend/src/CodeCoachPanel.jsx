@@ -5,9 +5,16 @@ const DEFAULT_TESTS = `# Optional pytest tests (recommended)
 #     assert add(1, 2) == 3
 `;
 
+const COACHING_MODES = [
+  { value: 'hint', label: 'Hint only' },
+  { value: 'step', label: 'Step-by-step' },
+  { value: 'full', label: 'Full explanation' },
+];
+
 function CodeCoachPanel() {
   const [code, setCode] = useState('');
   const [tests, setTests] = useState(DEFAULT_TESTS);
+  const [coachingMode, setCoachingMode] = useState('full');
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
@@ -32,6 +39,7 @@ function CodeCoachPanel() {
         },
         body: JSON.stringify({
           language: 'python',
+          coachingMode,
           code,
           tests,
         }),
@@ -73,6 +81,19 @@ function CodeCoachPanel() {
 
       <div className="code-coach-grid">
         <label className="login-field">
+          <span>Coaching mode</span>
+          <select
+            className="login-input"
+            value={coachingMode}
+            onChange={(event) => setCoachingMode(event.target.value)}
+          >
+            {COACHING_MODES.map((mode) => (
+              <option key={mode.value} value={mode.value}>{mode.label}</option>
+            ))}
+          </select>
+        </label>
+
+        <label className="login-field">
           <span>Python code</span>
           <textarea
             className="code-coach-textarea"
@@ -107,6 +128,17 @@ function CodeCoachPanel() {
 
       {result && (
         <div className="code-coach-results">
+          <article className="code-coach-card">
+            <h4>Mode</h4>
+            <p>
+              {result.coachingMode === 'hint'
+                ? 'Hint only'
+                : result.coachingMode === 'step'
+                  ? 'Step-by-step'
+                  : 'Full explanation'}
+            </p>
+          </article>
+
           <article className="code-coach-card">
             <h4>Hint</h4>
             <p>{result.hint || 'No hint available.'}</p>

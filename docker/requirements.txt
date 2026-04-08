@@ -1,7 +1,8 @@
-numpy
+numpy<2
 pandas
 scikit-learn
 matplotlib
 jupyterlab
 notebook
+tensorflow==2.17.1
 # Add more ML libs as needed

@@ -357,6 +357,14 @@ select {
 	padding: 1.4rem 1.5rem;
 }
 
+.workspace-header-actions {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-end;
+	gap: 0.75rem;
+	min-width: 220px;
+}
+
 .workspace-main-title {
 	font-size: clamp(1.7rem, 2.8vw, 2.5rem);
 }
@@ -369,6 +377,28 @@ select {
 	font-size: 0.82rem;
 	line-height: 1.5;
 	word-break: break-word;
+}
+
+.workspace-fullscreen-button {
+	padding: 0.72rem 1rem;
+	border: 1px solid rgba(16, 37, 66, 0.12);
+	border-radius: 999px;
+	background: rgba(255, 255, 255, 0.92);
+	color: var(--text);
+	font-weight: 600;
+	cursor: pointer;
+	box-shadow: 0 12px 24px rgba(16, 37, 66, 0.08);
+	transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.workspace-fullscreen-button:hover {
+	transform: translateY(-1px);
+	box-shadow: 0 16px 28px rgba(16, 37, 66, 0.11);
+	background: #fff;
+}
+
+.workspace-fullscreen-button:active {
+	transform: translateY(0);
 }
 
 .workspace-empty-state {
@@ -405,6 +435,37 @@ select {
 
 .workspace-frame-shell {
 	padding: 1rem;
+}
+
+.workspace-main.is-notebook-fullscreen {
+	position: fixed;
+	inset: 0;
+	z-index: 80;
+	padding: 1rem;
+	background: rgba(247, 244, 236, 0.96);
+	overflow: auto;
+}
+
+.workspace-main.is-notebook-fullscreen .workspace-header-card {
+	position: sticky;
+	top: 0;
+	z-index: 2;
+	backdrop-filter: blur(16px);
+	background: rgba(255, 250, 243, 0.94);
+	border: 1px solid rgba(16, 37, 66, 0.08);
+}
+
+.workspace-main.is-notebook-fullscreen .workspace-frame-shell {
+	min-height: calc(100vh - 14rem);
+	background: rgba(255, 255, 255, 0.92);
+	border-radius: 24px;
+	box-shadow: 0 24px 48px rgba(16, 37, 66, 0.12);
+}
+
+.workspace-main.is-notebook-fullscreen .workspace-frame-wrap,
+.workspace-main.is-notebook-fullscreen .workspace-frame {
+	min-height: calc(100vh - 17rem);
+	height: calc(100vh - 17rem);
 }
 
 .workspace-loading-banner {
@@ -883,6 +944,179 @@ word-break: break-word;
 	background: rgba(255, 255, 255, 0.72);
 }
 
+.admin-observability-panel {
+	display: flex;
+	flex-direction: column;
+	gap: 1rem;
+	padding: 1.15rem;
+	border-color: rgba(16, 37, 66, 0.08);
+	background:
+		linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(248, 244, 236, 0.9));
+}
+
+.admin-observability-grid {
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: 0.9rem;
+}
+
+.admin-observe-card {
+	padding: 1rem;
+	border-radius: 18px;
+	border: 1px solid rgba(16, 37, 66, 0.08);
+	background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(246, 248, 252, 0.88));
+	box-shadow: 0 18px 36px rgba(16, 37, 66, 0.06);
+	display: flex;
+	flex-direction: column;
+	gap: 0.65rem;
+}
+
+.admin-observe-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.5rem;
+}
+
+.admin-observe-head h3 {
+	margin: 0;
+	font-size: 0.95rem;
+	font-family: 'Space Grotesk', sans-serif;
+}
+
+.admin-observe-head strong {
+	font-size: 1.15rem;
+	font-family: 'Space Grotesk', sans-serif;
+}
+
+.admin-observe-caption {
+	margin: 0;
+	font-size: 0.86rem;
+	line-height: 1.45;
+	color: var(--muted);
+}
+
+.admin-sparkline {
+	width: 100%;
+	height: 58px;
+	display: block;
+	border-radius: 10px;
+	background: rgba(16, 37, 66, 0.045);
+	padding: 0.2rem;
+}
+
+.admin-sparkline polyline {
+	stroke: var(--accent-strong);
+}
+
+.admin-sparkline.is-deep polyline {
+	stroke: #1f4f7a;
+}
+
+.admin-sparkline.is-success polyline {
+	stroke: #208061;
+}
+
+.admin-sparkline.is-danger polyline {
+	stroke: #b93d31;
+}
+
+.admin-observability-secondary-grid {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 1rem;
+}
+
+.admin-observe-subpanel {
+	padding: 1rem;
+	border-radius: 18px;
+	border: 1px solid rgba(16, 37, 66, 0.08);
+	background: linear-gradient(180deg, rgba(255, 255, 255, 0.93), rgba(249, 250, 253, 0.88));
+	box-shadow: 0 16px 32px rgba(16, 37, 66, 0.05);
+}
+
+.admin-subpanel-head {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 0.75rem;
+	margin-bottom: 0.9rem;
+}
+
+.admin-subpanel-head h3 {
+	margin: 0;
+	font-family: 'Space Grotesk', sans-serif;
+	font-size: 1rem;
+}
+
+.admin-subpanel-head p {
+	margin: 0.25rem 0 0;
+	font-size: 0.86rem;
+	color: var(--muted);
+}
+
+.admin-empty-panel {
+	padding: 1rem;
+	border-radius: 14px;
+	border: 1px dashed rgba(16, 37, 66, 0.14);
+	background: rgba(16, 37, 66, 0.03);
+	display: flex;
+	flex-direction: column;
+	gap: 0.35rem;
+	color: var(--muted);
+	min-height: 120px;
+	justify-content: center;
+	align-items: center;
+	text-align: center;
+}
+
+.admin-empty-panel strong {
+	color: var(--text);
+	font-family: 'Space Grotesk', sans-serif;
+}
+
+.admin-empty-panel span {
+	font-size: 0.88rem;
+	line-height: 1.5;
+}
+
+.admin-timeline-list {
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+	max-height: 280px;
+	overflow: auto;
+}
+
+.admin-timeline-item {
+	padding: 0.6rem 0.7rem;
+	border-radius: 12px;
+	border: 1px solid rgba(16, 37, 66, 0.1);
+	background: rgba(255, 255, 255, 0.8);
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	gap: 0.6rem;
+}
+
+.admin-timeline-item strong {
+	display: block;
+	font-size: 0.86rem;
+	text-transform: capitalize;
+}
+
+.admin-timeline-item span {
+	font-size: 0.79rem;
+	color: var(--muted);
+}
+
+.admin-timeline-item em {
+	font-size: 0.78rem;
+	color: var(--muted);
+	font-style: normal;
+	white-space: nowrap;
+}
+
 .admin-table-wrap {
 	overflow-x: auto;
 	border-radius: 22px;
@@ -1267,6 +1501,18 @@ word-break: break-word;
 		flex-direction: column;
 	}
 
+	.workspace-header-actions {
+		width: 100%;
+		align-items: stretch;
+		min-width: 0;
+	}
+
+	.workspace-url-chip,
+	.workspace-fullscreen-button {
+		width: 100%;
+		max-width: none;
+	}
+
 	.login-hero {
 		padding-right: 0;
 	}
@@ -1304,6 +1550,19 @@ word-break: break-word;
 
 	.admin-user-usage-grid {
 		grid-template-columns: 1fr;
+	}
+
+	.admin-observability-grid,
+	.admin-observability-secondary-grid {
+		grid-template-columns: 1fr;
+	}
+
+	.admin-subpanel-head {
+		flex-direction: column;
+	}
+
+	.admin-legend {
+		justify-content: flex-start;
 	}
 
 	.admin-review-grid,

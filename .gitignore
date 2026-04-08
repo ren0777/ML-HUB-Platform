@@ -11,3 +11,17 @@ build/
 server/node_modules/
 frontend/node_modules/
 *.log
+.mcp.json
+.opencode.json
+.idea/
+*.iml
+.vscode/
+.opencode.json
+.windsurfrules
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.claude/
+.cursorrules
+UPCOMING-FEATURES.md
+server/data/

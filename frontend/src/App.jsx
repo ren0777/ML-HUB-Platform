@@ -152,6 +152,8 @@ function App() {
   const [quotaSetupComplete, setQuotaSetupComplete] = useState(true);
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const [authReady, setAuthReady] = useState(false);
+  const [isNotebookFullscreen, setIsNotebookFullscreen] = useState(false);
+  const notebookFullscreenRef = React.useRef(null);
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -354,6 +356,7 @@ function App() {
   useEffect(() => {
     if (!sessionToken) {
       setIframeLoaded(false);
+      setIsNotebookFullscreen(false);
       return;
     }
 
@@ -366,6 +369,40 @@ function App() {
 
     return () => clearTimeout(timeout);
   }, [sessionToken, iframeLoaded]);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsNotebookFullscreen(Boolean(document.fullscreenElement));
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    };
+  }, []);
+
+  const toggleNotebookFullscreen = async () => {
+    const target = notebookFullscreenRef.current;
+
+    if (!target) {
+      return;
+    }
+
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+        return;
+      }
+
+      if (typeof target.requestFullscreen === 'function') {
+        await target.requestFullscreen();
+      } else {
+        setIsNotebookFullscreen((previous) => !previous);
+      }
+    } catch (err) {
+      setIsNotebookFullscreen((previous) => !previous);
+    }
+  };
 
   if (!authReady) {
     return (
@@ -393,6 +430,7 @@ function App() {
   const userNotebookReviewPath = username ? `/${username}/admin/notebooks` : '/';
   const userQuotaPath = username ? `/${username}/setup-quota` : '/';
   const isAdminDashboardRoute = /\/admin(\/notebooks)?\/?$/.test(window.location.pathname.toLowerCase());
+  const isQuotaBlocked = !quotaSetupComplete && userRole !== 'admin';
 
   return (
     <Router>
@@ -405,6 +443,9 @@ function App() {
             <h1 className="app-brand">MLHub</h1>
           </div>
           <div className="app-topbar-actions">
+            {isQuotaBlocked && (
+              <Link to={userQuotaPath} className="app-admin-link">Set quota</Link>
+            )}
             {userRole === 'admin' && (
               <>
                 <Link to={userAdminPath} className="app-admin-link">Admin Dashboard</Link>
@@ -422,6 +463,11 @@ function App() {
             <div className="app-alert" role="alert">
               <strong>Session Alert</strong>
               <span>{error}</span>
+              {isQuotaBlocked && (
+                <Link to={userQuotaPath} className="app-admin-link" style={{ alignSelf: 'flex-start', marginTop: '0.5rem' }}>
+                  Open quota setup
+                </Link>
+              )}
             </div>
           )}
 
@@ -528,18 +574,30 @@ function App() {
                       </section>
                       </aside>
 
-                      <section className="workspace-main">
+                      <section className={`workspace-main ${isNotebookFullscreen ? 'is-notebook-fullscreen' : ''}`} ref={notebookFullscreenRef}>
                         <div className="workspace-header-card">
-                        <div>
-                          <p className="workspace-label">Live notebook</p>
-                          <h2 className="workspace-main-title">{iframeLoaded ? 'Jupyter Lab is ready' : 'Preparing your coding canvas'}</h2>
-                          <p className="workspace-copy workspace-copy-wide">
-                            {sessionToken
-                              ? 'Your notebook opens inside the workspace frame below. If startup takes too long, restart the session from the side panel.'
-                              : 'Start a fresh notebook session to open an isolated Jupyter Lab environment.'}
-                          </p>
-                        </div>
-                          <div className="workspace-url-chip">{sessionToken ? notebookUrl : 'Awaiting launch'}</div>
+                          <div>
+                            <p className="workspace-label">Live notebook</p>
+                            <h2 className="workspace-main-title">{iframeLoaded ? 'Jupyter Lab is ready' : 'Preparing your coding canvas'}</h2>
+                            <p className="workspace-copy workspace-copy-wide">
+                              {sessionToken
+                                ? 'Your notebook opens inside the workspace frame below. If startup takes too long, restart the session from the side panel.'
+                                : 'Start a fresh notebook session to open an isolated Jupyter Lab environment.'}
+                            </p>
+                          </div>
+                          <div className="workspace-header-actions">
+                            <div className="workspace-url-chip">{sessionToken ? notebookUrl : 'Awaiting launch'}</div>
+                            {sessionToken && (
+                              <button
+                                type="button"
+                                className="workspace-fullscreen-button"
+                                onClick={toggleNotebookFullscreen}
+                                aria-pressed={isNotebookFullscreen}
+                              >
+                                {isNotebookFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+                              </button>
+                            )}
+                          </div>
                         </div>
 
                         {!sessionToken ? (

@@ -27,6 +27,65 @@ function formatModeLabel(mode) {
   return mode || 'Unknown';
 }
 
+function clampHistory(entries, max = 40) {
+  if (!Array.isArray(entries)) {
+    return [];
+  }
+
+  if (entries.length <= max) {
+    return entries;
+  }
+
+  return entries.slice(entries.length - max);
+}
+
+function formatRelativeTime(timestamp) {
+  const ts = Number(timestamp) || 0;
+  if (!ts) {
+    return '--';
+  }
+
+  const deltaMs = Date.now() - ts;
+  const seconds = Math.max(1, Math.floor(deltaMs / 1000));
+  if (seconds < 60) {
+    return `${seconds}s ago`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ago`;
+}
+
+function Sparkline({ values, colorClass = '' }) {
+  const points = Array.isArray(values) ? values : [];
+  const safeValues = points.length > 1 ? points : [0, points[0] || 0, points[0] || 0];
+  const max = Math.max(...safeValues, 1);
+  const step = 100 / (safeValues.length - 1);
+  const d = safeValues
+    .map((value, index) => {
+      const x = index * step;
+      const y = 100 - (Math.max(0, value) / max) * 100;
+      return `${x},${y}`;
+    })
+    .join(' ');
+
+  return (
+    <svg className={`admin-sparkline ${colorClass}`} viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+      <polyline points={d} fill="none" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function formatEventLabel(type = '') {
+  return String(type)
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
 function UsageMeter({ label, used, free, percent, tone = 'accent' }) {
   return (
     <div className="admin-analytics-card">
@@ -57,6 +116,8 @@ function AdminDashboard() {
   const [sessions, setSessions] = useState([]);
   const [analytics, setAnalytics] = useState(null);
   const [userUsage, setUserUsage] = useState([]);
+  const [telemetryHistory, setTelemetryHistory] = useState([]);
+  const [eventFeed, setEventFeed] = useState([]);
   const [selectedUsageUser, setSelectedUsageUser] = useState('');
   const [newUser, setNewUser] = useState({ username: '', password: '', role: 'user' });
   const [error, setError] = useState(null);
@@ -93,11 +154,22 @@ function AdminDashboard() {
           return;
         }
 
+        setEventFeed((previous) => {
+          const next = [...previous, {
+            type: data.type,
+            payload: data.payload || {},
+            ts: Number(data.ts) || Date.now(),
+          }];
+          return clampHistory(next, 120);
+        });
+
         if (
           data.type === 'user_added' ||
           data.type === 'user_deleted' ||
           data.type === 'session_started' ||
-          data.type === 'session_stopped'
+          data.type === 'session_stopped' ||
+          data.type === 'session_start_failed' ||
+          data.type === 'code_analysis_failed'
         ) {
           fetchAdminData();
         }
@@ -173,6 +245,15 @@ function AdminDashboard() {
       setAnalytics(analyticsData);
       const usageItems = Array.isArray(userUsageData?.items) ? userUsageData.items : [];
       setUserUsage(usageItems);
+      setTelemetryHistory((previous) => {
+        const next = [...previous, {
+          ts: Date.now(),
+          activeSessions: Array.isArray(sessionsData) ? sessionsData.length : 0,
+          memoryPressure: Number(analyticsData?.hostMemory?.usagePercent || 0),
+          storageUsedBytes: Number(analyticsData?.storage?.usedBytes || 0),
+        }];
+        return clampHistory(next, 40);
+      });
       setSelectedUsageUser((previous) => {
         if (previous && usageItems.some((item) => item.username === previous)) {
           return previous;
@@ -322,6 +403,17 @@ function AdminDashboard() {
     : null;
   const usernameFromRoute = location.pathname.split('/').filter(Boolean)[0] || '';
   const notebookReviewPath = usernameFromRoute ? `/${usernameFromRoute}/admin/notebooks` : '/';
+  const activeSeries = telemetryHistory.map((entry) => entry.activeSessions || 0);
+  const memorySeries = telemetryHistory.map((entry) => entry.memoryPressure || 0);
+  const storageSeries = telemetryHistory.map((entry) => entry.storageUsedBytes || 0);
+  const failedEvents = eventFeed.filter((event) => /failed|error/i.test(event.type));
+  const failedSeries = telemetryHistory.map((entry) => {
+    const ts = Number(entry?.ts) || 0;
+    return failedEvents.filter((event) => (Number(event?.ts) || 0) <= ts).length;
+  });
+  const timelineRows = [...eventFeed]
+    .sort((left, right) => (Number(right.ts) || 0) - (Number(left.ts) || 0))
+    .slice(0, 12);
 
   return (
     <div className="admin-shell">
@@ -495,6 +587,83 @@ function AdminDashboard() {
               )}
             </tbody>
           </table>
+        </div>
+      </section>
+
+      <section className="workspace-panel admin-observability-panel">
+        <div className="admin-section-head admin-section-head-compact">
+          <div>
+            <p className="workspace-label">Admin observability dashboard</p>
+            <h2 className="admin-section-title">Pro-level live monitoring</h2>
+            <p className="admin-section-description">
+              This view combines live session counts, resource pressure, and failure signals so you can spot drift before users complain.
+            </p>
+          </div>
+        </div>
+
+        <div className="admin-observability-grid">
+          <article className="admin-observe-card">
+            <div className="admin-observe-head">
+              <h3>Active sessions</h3>
+              <strong>{sessions.length}</strong>
+            </div>
+            <p className="admin-observe-caption">How many notebook sessions are currently attached and active.</p>
+            <Sparkline values={activeSeries} colorClass="is-accent" />
+          </article>
+
+          <article className="admin-observe-card">
+            <div className="admin-observe-head">
+              <h3>Memory pressure</h3>
+              <strong>{hostMemory ? `${hostMemory.usagePercent.toFixed(1)}%` : '0.0%'}</strong>
+            </div>
+            <p className="admin-observe-caption">Host RAM pressure over the latest refresh windows.</p>
+            <Sparkline values={memorySeries} colorClass="is-deep" />
+          </article>
+
+          <article className="admin-observe-card">
+            <div className="admin-observe-head">
+              <h3>Storage growth</h3>
+              <strong>{formatBytes(storage?.usedBytes || 0)}</strong>
+            </div>
+            <p className="admin-observe-caption">Tracked notebook storage growth from the current telemetry source.</p>
+            <Sparkline values={storageSeries} colorClass="is-success" />
+          </article>
+
+          <article className="admin-observe-card">
+            <div className="admin-observe-head">
+              <h3>Failed events</h3>
+              <strong>{failedEvents.length}</strong>
+            </div>
+            <p className="admin-observe-caption">Code analysis and session failures captured from live events.</p>
+            <Sparkline values={failedSeries} colorClass="is-danger" />
+          </article>
+        </div>
+
+        <div className="admin-observability-secondary-grid">
+          <article className="admin-observe-subpanel">
+            <div className="admin-subpanel-head">
+              <div>
+                <h3>Per-user timeline</h3>
+                <p>Recent events from the SSE feed, ordered newest first.</p>
+              </div>
+            </div>
+            <div className="admin-timeline-list">
+              {timelineRows.length > 0 ? timelineRows.map((event, index) => (
+                <div key={`${event.type}-${event.ts}-${index}`} className="admin-timeline-item">
+                  <div>
+                    <strong>{formatEventLabel(event.type)}</strong>
+                    <span>{event.payload?.user || event.payload?.username || 'system'}</span>
+                  </div>
+                  <em>{formatRelativeTime(event.ts)}</em>
+                </div>
+              )) : (
+                <div className="admin-empty-panel">
+                  <strong>No timeline events yet.</strong>
+                  <span>Start a session, stop one, or run an analysis to populate the stream.</span>
+                </div>
+              )}
+            </div>
+          </article>
         </div>
       </section>
 
